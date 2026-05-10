@@ -45,6 +45,22 @@ default_profile="$(HOME="$TEST_HOME" PATH="$TEST_HOME/.local/bin:$TEST_HOME/bin:
 HOME="$TEST_HOME" PATH="$TEST_HOME/.local/bin:$TEST_HOME/bin:/usr/bin:/bin" "$TEST_HOME/.local/bin/codex" accounts >/tmp/codex-multi-account-accounts.out
 grep -q $'firstacc\tnot-logged-in\tdefault' /tmp/codex-multi-account-accounts.out
 
+HOME="$TEST_HOME" PATH="$TEST_HOME/.local/bin:$TEST_HOME/bin:/usr/bin:/bin" "$TEST_HOME/.local/bin/codex" as secondacc --version >/tmp/codex-multi-account-second.out 2>/tmp/codex-multi-account-second.err
+[ -d "$TEST_HOME/.codex-accounts/secondacc" ]
+HOME="$TEST_HOME" PATH="$TEST_HOME/.local/bin:$TEST_HOME/bin:/usr/bin:/bin" "$TEST_HOME/.local/bin/codex" remove-account secondacc >/tmp/codex-multi-account-remove-second.out
+[ ! -e "$TEST_HOME/.codex-accounts/secondacc" ]
+
+set +e
+HOME="$TEST_HOME" PATH="$TEST_HOME/.local/bin:$TEST_HOME/bin:/usr/bin:/bin" "$TEST_HOME/.local/bin/codex" remove-account firstacc >/tmp/codex-multi-account-remove-default.out 2>&1
+remove_default_status=$?
+set -e
+[ "$remove_default_status" -ne 0 ]
+[ -d "$TEST_HOME/.codex-accounts/firstacc" ]
+
+HOME="$TEST_HOME" PATH="$TEST_HOME/.local/bin:$TEST_HOME/bin:/usr/bin:/bin" "$TEST_HOME/.local/bin/codex" remove-account firstacc --force >/tmp/codex-multi-account-remove-default-force.out
+[ ! -e "$TEST_HOME/.codex-accounts/firstacc" ]
+[ ! -e "$TEST_HOME/.codex-default-profile" ]
+
 HOME="$TEST_HOME" PATH="$TEST_HOME/.local/bin:$TEST_HOME/bin:/usr/bin:/bin" "$ROOT/clean-multi-codex.sh" >/tmp/codex-multi-account-clean.out
 
 [ -f "$TEST_HOME/.codex/auth.json" ]

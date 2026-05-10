@@ -156,7 +156,7 @@ trap 'cleanup_on_exit' EXIT INT TERM
 
 is_reserved_command() {
   case "\${1:-}" in
-    ""|as|profile|use|default|accounts|account-home|sessions-home|shared-sessions|locks|clear-stale-locks|real|help|\\
+    ""|as|profile|use|default|accounts|remove-account|delete-account|account-home|sessions-home|shared-sessions|locks|clear-stale-locks|real|help|\\
 exec|e|review|login|logout|mcp|plugin|mcp-server|app-server|remote-control|completion|update|sandbox|debug|apply|a|resume|fork|cloud|exec-server|features)
       return 0 ;;
     *) return 1 ;;
@@ -277,6 +277,35 @@ list_accounts() {
       printf '%s\\t%s\\n' "\$acct" "\$status"
     fi
   done | sort
+}
+
+remove_account() {
+  local acct="\${1:-}"
+  local force="\${2:-}"
+  local default_acct
+
+  if ! is_profile_name "\$acct"; then
+    echo "Usage: codex remove-account <profile> [--force]" >&2
+    return 1
+  fi
+
+  if [ ! -d "\$ACCOUNTS_HOME/\$acct" ]; then
+    echo "codex: profile not found: \$acct" >&2
+    return 1
+  fi
+
+  default_acct="\$(default_account || true)"
+  if [ "\$acct" = "\$default_acct" ] && [ "\$force" != "--force" ]; then
+    echo "codex: refusing to remove default profile '\$acct'." >&2
+    echo "Set another default first, or run: codex remove-account \$acct --force" >&2
+    return 1
+  fi
+
+  rm -rf "\$ACCOUNTS_HOME/\$acct"
+  if [ "\$acct" = "\$default_acct" ]; then
+    rm -f "\$DEFAULT_PROFILE_FILE"
+  fi
+  echo "Removed Codex profile: \$acct"
 }
 
 session_lock_key() {
@@ -403,6 +432,8 @@ case "\${1:-}" in
       exit 1
     fi ;;
   accounts) list_accounts ;;
+  remove-account|delete-account)
+    remove_account "\${2:-}" "\${3:-}" ;;
   account-home)
     [ -n "\${2:-}" ] || { echo "Usage: codex account-home <profile>" >&2; exit 1; }
     is_profile_name "\$2" || { echo "codex: invalid profile name: \$2" >&2; exit 1; }
@@ -421,6 +452,7 @@ Usage:
   codex <profile> [args...]     Use an existing named profile
   codex default [profile]       Show or set the default profile
   codex accounts                List profiles and login status
+  codex remove-account <name>   Remove a profile, but never shared sessions
   codex account-home <profile>  Print a profile CODEX_HOME
   codex shared-sessions         Print shared sessions directory
   codex locks                   List active/stale explicit-resume locks
