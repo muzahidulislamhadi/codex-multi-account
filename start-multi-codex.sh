@@ -441,6 +441,10 @@ HELP
       acct="\$(require_default_account)"; ensure_profile "\$acct"; run_codex "\$acct" "\$@"
     elif is_profile_name "\$1" && [ -d "\$ACCOUNTS_HOME/\$1" ]; then
       acct="\$1"; shift; ensure_profile "\$acct"; run_codex "\$acct" "\$@"
+    elif is_profile_name "\$1" && [ "\$#" -gt 1 ] && is_reserved_command "\$2"; then
+      echo "codex: profile '\$1' does not exist yet." >&2
+      echo "Create it with: codex as \$1 \$2" >&2
+      exit 1
     elif is_profile_name "\$1"; then
       acct="\$(require_default_account)"; ensure_profile "\$acct"; run_codex "\$acct" "\$@"
     else
