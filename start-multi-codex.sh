@@ -138,31 +138,7 @@ restore_terminal() {
   stty sane < "\$tty_path" 2>/dev/null || true
 }
 
-drain_terminal_input() {
-  local tty_path old_stty _ch idle_polls=0 drained=0
-  tty_path="\$(current_tty_path)" || return 0
-  [ -r "\$tty_path" ] || return 0
-
-  old_stty="\$(stty -g < "\$tty_path" 2>/dev/null || true)"
-  [ -n "\$old_stty" ] || return 0
-  stty -echo -icanon min 0 time 1 < "\$tty_path" 2>/dev/null || return 0
-
-  sleep 0.04
-  while [ "\$idle_polls" -lt 3 ] && [ "\$drained" -lt 256 ]; do
-    if IFS= read -r -s -n 1 _ch < "\$tty_path"; then
-      drained=\$((drained + 1))
-      idle_polls=0
-    else
-      idle_polls=\$((idle_polls + 1))
-    fi
-  done
-
-  stty "\$old_stty" < "\$tty_path" 2>/dev/null || true
-}
-
 cleanup_terminal_after_tui() {
-  restore_terminal
-  drain_terminal_input
   restore_terminal
 }
 
