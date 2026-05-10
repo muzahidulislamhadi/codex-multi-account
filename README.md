@@ -1,10 +1,10 @@
 # codex-multi-account
 
-Use multiple Codex accounts on one machine without modifying the official Codex CLI.
+Run multiple Codex accounts on one machine without modifying the official Codex CLI.
 
-This project installs a small reversible wrapper around `codex`. The official Codex binary stays untouched and updateable. Each account gets its own auth/state/cache/logs, while all accounts can see the same session history.
+The wrapper keeps the official `codex` binary untouched, gives each profile its own auth/state/cache/logs, and shares only session files.
 
-## Quick Start
+## Install
 
 ```bash
 git clone https://github.com/muzahidulislamhadi/codex-multi-account.git
@@ -13,90 +13,49 @@ cd codex-multi-account
 source ~/.bashrc
 ```
 
-Add your first account:
+Do not run the installer with `sudo`.
+
+## Core Usage
+
+Create or open a profile:
 
 ```bash
-codex as personal login
+codex as account1
 ```
 
-That creates a profile named `personal`, logs it in, and makes it the default because it is the first profile.
-
-Use Codex normally:
+Create or login a profile:
 
 ```bash
-codex
-codex resume
-codex exec "summarize this repo"
+codex as account1 login
 ```
 
-All plain `codex ...` commands use the default profile.
-
-## Add More Accounts
-
-Add a work account:
+After a profile exists, use it directly:
 
 ```bash
-codex as work login
+codex account1
+codex account1 login
+codex account1 resume
+codex account1 exec "summarize this repo"
 ```
 
-Add a client account:
+Add another account:
 
 ```bash
-codex as client-a login
+codex as account2 login
 ```
 
-Add a QA account:
+Switch accounts by name:
 
 ```bash
-codex as qa login
+codex account1
+codex account2
 ```
 
-The pattern is always:
+The first profile you create becomes the default automatically.
 
-```bash
-codex as <profile-name> login
-```
+## Default Profile
 
-Profile names may contain letters, numbers, dots, underscores, and dashes.
-
-Good profile names:
-
-```text
-personal
-work
-client-a
-client.alpha
-qa
-```
-
-## Switch Accounts
-
-After a profile exists, use it by name:
-
-```bash
-codex personal
-codex work
-codex client-a
-```
-
-Run any Codex command under a specific account:
-
-```bash
-codex personal resume
-codex work exec "review this PR"
-codex client-a login status
-codex qa --version
-```
-
-Resume a specific session under a specific account:
-
-```bash
-codex work resume 019e0a66-d990-7671-a85e-1f9f0838b49c
-```
-
-## Default Account
-
-Show the current default:
+Show the default:
 
 ```bash
 codex default
@@ -105,21 +64,23 @@ codex default
 Set the default:
 
 ```bash
-codex default work
+codex default account2
 ```
 
-Now these commands run under `work`:
+Run Codex under the default profile:
 
 ```bash
 codex
 codex login
 codex resume
-codex exec "explain this codebase"
+codex exec "review this code"
 ```
 
-So default mode behaves like normal official Codex usage, except the data is stored in that profile's isolated `CODEX_HOME`.
+Default mode behaves like normal Codex usage, except the data is stored under the default profile.
 
-## List Accounts
+## Account Commands
+
+List accounts:
 
 ```bash
 codex accounts
@@ -128,63 +89,149 @@ codex accounts
 Example:
 
 ```text
-personal      logged-in      default
-work          logged-in
-client-a      logged-in
-qa            not-logged-in
+account1    logged-in    default
+account2    logged-in
+account3    not-logged-in
 ```
 
-## Important Syntax
-
-Create a new profile with `as`:
+Show a profile directory:
 
 ```bash
-codex as work login
+codex account-home account1
 ```
 
-Use an existing profile directly:
+Show the shared sessions directory:
 
 ```bash
-codex work
+codex shared-sessions
 ```
 
-This is intentional. It keeps the wrapper compatible with future official Codex commands. Unknown future commands are passed to the official Codex binary instead of being treated as profile names.
-
-If you run this before `work` exists:
+Show wrapper help:
 
 ```bash
-codex work login
+codex help
 ```
 
-the wrapper will tell you to use:
+Show official Codex binary used by the wrapper:
 
 ```bash
-codex as work login
+codex real
 ```
 
-## How It Works
+## Profile Creation Rules
 
-Official Codex remains wherever it is installed, for example:
+Use `as` when creating a profile:
 
 ```bash
-~/.npm-global/bin/codex
+codex as account3 login
 ```
 
-The wrapper is installed at:
+Use direct name after it exists:
 
 ```bash
-~/.local/bin/codex
+codex account3
 ```
 
-Each profile gets a separate Codex home:
+If you run:
 
 ```bash
-~/.codex-accounts/personal
-~/.codex-accounts/work
-~/.codex-accounts/client-a
+codex as account3
 ```
 
-These stay separate per account:
+the profile is created and saved even if you do not login. You can login later:
+
+```bash
+codex account3 login
+```
+
+Allowed profile names:
+
+```text
+letters, numbers, dot, underscore, dash
+```
+
+Examples:
+
+```text
+account1
+account2
+work-main
+client.alpha
+```
+
+## Official Codex Commands
+
+All official Codex commands work under either the default profile or a named profile.
+
+Default profile:
+
+```bash
+codex login
+codex logout
+codex resume
+codex exec "..."
+codex review
+codex mcp
+codex plugin
+codex update
+codex --version
+```
+
+Named profile:
+
+```bash
+codex account1 login
+codex account1 logout
+codex account1 resume
+codex account1 exec "..."
+codex account1 review
+codex account1 mcp
+codex account1 plugin
+codex account1 --version
+```
+
+Unknown future Codex commands pass through to the official Codex binary under the default profile.
+
+## Session Locks
+
+Explicit session resumes are locked:
+
+```bash
+codex account1 resume <session-id>
+codex account2 resume <same-session-id>
+```
+
+The second command is blocked while the first process is alive.
+
+List locks:
+
+```bash
+codex locks
+```
+
+Remove stale locks:
+
+```bash
+codex clear-stale-locks
+```
+
+`resume --last` and picker mode are not pre-locked because the wrapper cannot know the selected session before Codex starts.
+
+## Storage Layout
+
+Profiles:
+
+```bash
+~/.codex-accounts/<profile>
+```
+
+Shared sessions:
+
+```bash
+~/.codex-shared/sessions
+```
+
+Separate per profile:
 
 ```text
 auth.json
@@ -196,79 +243,15 @@ config.toml
 history.jsonl
 ```
 
-Only sessions are shared:
-
-```bash
-~/.codex-shared/sessions
-```
-
-That means accounts stay logged in separately, but they can resume the same session history.
-
-## Session Locking
-
-The wrapper blocks two terminals from explicitly opening the same session ID at the same time:
-
-```bash
-codex work resume 019e0a66-d990-7671-a85e-1f9f0838b49c
-codex client-a resume 019e0a66-d990-7671-a85e-1f9f0838b49c
-```
-
-The second command is blocked while the first one is still alive.
-
-Check locks:
-
-```bash
-codex locks
-```
-
-Clear stale locks:
-
-```bash
-codex clear-stale-locks
-```
-
-Picker mode and `resume --last` are not pre-locked because the wrapper cannot know which session Codex will select before Codex starts. For team work, prefer explicit session IDs when resuming important sessions.
-
-## Update Codex
-
-Update the official Codex CLI normally:
-
-```bash
-npm i -g @openai/codex@latest
-```
-
-The wrapper is outside the official package, so Codex updates do not overwrite it.
-
 ## Rollback
 
-The installer creates a backup before changing anything:
-
-```bash
-~/.codex-multi-backups/<timestamp>
-```
-
-Restore the exact previous single-account setup:
+Restore the previous single-account Codex setup:
 
 ```bash
 ./clean-multi-codex.sh
 ```
 
-Restore from a specific backup:
-
-```bash
-./clean-multi-codex.sh ~/.codex-multi-backups/20260510-120000
-```
-
-Rollback restores:
-
-- `~/.codex`
-- `~/.bashrc`
-- `~/.local/bin/codex`, if one existed
-- `~/.codex-accounts`, if one existed
-- `~/.codex-shared`, if one existed
-- `~/.codex-default-profile`, if one existed
-
-By default, the cleaner removes the used backup after a successful restore. Keep it for auditing:
+Keep the rollback backup:
 
 ```bash
 CODEX_MULTI_KEEP_BACKUP=1 ./clean-multi-codex.sh
@@ -276,41 +259,10 @@ CODEX_MULTI_KEEP_BACKUP=1 ./clean-multi-codex.sh
 
 ## Verify
 
-Run the isolated test:
+Run an isolated install/rollback test:
 
 ```bash
 ./scripts/verify.sh
 ```
 
 It uses a fake Codex binary in `/tmp` and does not touch your real Codex setup.
-
-## Advanced Install Options
-
-Most users do not need these.
-
-Prepare profiles during install:
-
-```bash
-CODEX_MULTI_PROFILES="personal work qa" ./start-multi-codex.sh
-```
-
-Set a default during install:
-
-```bash
-CODEX_MULTI_DEFAULT_PROFILE=personal ./start-multi-codex.sh
-```
-
-Use a custom backup directory:
-
-```bash
-CODEX_MULTI_BACKUP_ROOT="$HOME/backups/codex-multi" ./start-multi-codex.sh
-```
-
-## Safety Rules
-
-- Do not run with `sudo`.
-- Do not share or symlink `auth.json`.
-- Do not share SQLite state or log files.
-- Share only the `sessions` directory.
-- Use `codex as <profile> login` to add each account.
-- Use `codex <profile>` to switch to an existing account.
