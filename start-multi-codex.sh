@@ -90,10 +90,13 @@ append_bashrc_block() {
 # Official Codex remains installed separately. This PATH entry makes the
 # reversible multi-account wrapper run first.
 unset -f codex 2>/dev/null || true
-case ":$PATH:" in
-  *":$HOME/.local/bin:"*) ;;
-  *) export PATH="$HOME/.local/bin:$PATH" ;;
-esac
+_codex_multi_bin="$HOME/.local/bin"
+_codex_multi_path=":$PATH:"
+_codex_multi_path="${_codex_multi_path//:$_codex_multi_bin:/:}"
+_codex_multi_path="${_codex_multi_path#:}"
+_codex_multi_path="${_codex_multi_path%:}"
+export PATH="$_codex_multi_bin${_codex_multi_path:+:$_codex_multi_path}"
+unset _codex_multi_bin _codex_multi_path
 # <<< codex multi-account <<<
 EOF
 }
