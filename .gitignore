@@ -1,0 +1,8 @@
+.DS_Store
+*.log
+tmp/
+.codex-multi-backups/
+.codex-accounts/
+.codex-shared/
+.codex-default-profile
+gitdir/
