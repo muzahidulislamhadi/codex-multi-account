@@ -138,35 +138,7 @@ restore_terminal() {
   stty sane < "\$tty_path" 2>/dev/null || true
 }
 
-flush_vscode_terminal_key_release() {
-  local tty_path old_stty _ch idle_polls=0 flushed=0
-  [ "\${TERM_PROGRAM:-}" = "vscode" ] || return 0
-
-  tty_path="\$(current_tty_path)" || return 0
-  [ -r "\$tty_path" ] || return 0
-
-  old_stty="\$(stty -g < "\$tty_path" 2>/dev/null || true)"
-  [ -n "\$old_stty" ] || return 0
-  stty -echo -icanon min 0 time 0 < "\$tty_path" 2>/dev/null || return 0
-
-  # Cursor/VS Code can leave a kitty CSI-u key-release event queued after the TUI exits.
-  sleep 0.02
-  while [ "\$idle_polls" -lt 2 ] && [ "\$flushed" -lt 32 ]; do
-    if IFS= read -r -s -n 1 -t 0.001 _ch < "\$tty_path"; then
-      flushed=\$((flushed + 1))
-      idle_polls=0
-    else
-      idle_polls=\$((idle_polls + 1))
-      sleep 0.005
-    fi
-  done
-
-  stty "\$old_stty" < "\$tty_path" 2>/dev/null || true
-}
-
 cleanup_terminal_after_tui() {
-  restore_terminal
-  flush_vscode_terminal_key_release
   restore_terminal
 }
 
@@ -444,7 +416,11 @@ run_codex() {
   real="\$(resolve_real_codex)" || { echo "codex: official Codex binary not found." >&2; return 127; }
   acquire_session_lock "\$acct" "\$@"
   set +e
-  env CODEX_HOME="\$ACCOUNTS_HOME/\$acct" "\$real" "\$@"
+  if [ "\${TERM_PROGRAM:-}" = "vscode" ]; then
+    env CODEX_HOME="\$ACCOUNTS_HOME/\$acct" CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT=1 "\$real" "\$@"
+  else
+    env CODEX_HOME="\$ACCOUNTS_HOME/\$acct" "\$real" "\$@"
+  fi
   status=\$?
   set -e
   cleanup_session_lock

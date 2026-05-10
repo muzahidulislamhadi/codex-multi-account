@@ -110,6 +110,7 @@ codex account1 --version
 - Removing the default profile requires `--force` or setting another default first.
 - Explicit `resume <session-id>` is locked so two accounts cannot open the same session ID at once.
 - `resume --last` and picker mode are not pre-locked because the selected session is unknown before Codex starts.
+- Cursor/VS Code terminals run Codex with `CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT=1` to avoid leaked CSI-u key-release sequences after quitting.
 - Profile names may contain letters, numbers, dot, underscore, and dash.
 
 ## Rollback
