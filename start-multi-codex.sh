@@ -117,24 +117,47 @@ SESSION_LOCKS="\${CODEX_MULTI_SESSION_LOCKS:-\$HOME/.codex-shared/session-locks}
 DEFAULT_PROFILE_FILE="\${CODEX_MULTI_DEFAULT_PROFILE_FILE:-\$HOME/.codex-default-profile}"
 ACTIVE_SESSION_LOCK=""
 
-restore_terminal() {
+current_tty_path() {
   local tty_path
   tty_path="\$(tty 2>/dev/null || true)"
-  if [[ "\$tty_path" == /dev/* && -w "\$tty_path" ]]; then
-    printf '\\033[<u\\033[<u\\033[<u\\033[?2004l\\033[?1004l\\033[?1l\\033>' > "\$tty_path" 2>/dev/null || true
-    command -v tput >/dev/null 2>&1 && tput rmkx > "\$tty_path" 2>/dev/null || true
-    stty sane < "\$tty_path" 2>/dev/null || true
+  if [[ "\$tty_path" == /dev/* ]]; then
+    printf '%s\\n' "\$tty_path"
+    return 0
   fi
+  return 1
+}
+
+restore_terminal() {
+  local tty_path
+  tty_path="\$(current_tty_path)" || return 0
+  [ -w "\$tty_path" ] || return 0
+
+  # Pop kitty keyboard protocol state and disable common shell-facing modes.
+  printf '\\033[<u\\033[?2004l\\033[?1004l\\033[?1l\\033>' > "\$tty_path" 2>/dev/null || true
+  command -v tput >/dev/null 2>&1 && tput rmkx > "\$tty_path" 2>/dev/null || true
+  stty sane < "\$tty_path" 2>/dev/null || true
 }
 
 drain_terminal_input() {
-  local tty_path _ch
-  tty_path="\$(tty 2>/dev/null || true)"
-  if [[ "\$tty_path" != /dev/* || ! -r "\$tty_path" ]]; then
-    return 0
-  fi
-  sleep 0.08
-  while IFS= read -r -s -t 0.02 -n 1 _ch < "\$tty_path"; do :; done
+  local tty_path old_stty _ch idle_polls=0 drained=0
+  tty_path="\$(current_tty_path)" || return 0
+  [ -r "\$tty_path" ] || return 0
+
+  old_stty="\$(stty -g < "\$tty_path" 2>/dev/null || true)"
+  [ -n "\$old_stty" ] || return 0
+  stty -echo -icanon min 0 time 1 < "\$tty_path" 2>/dev/null || return 0
+
+  sleep 0.04
+  while [ "\$idle_polls" -lt 3 ] && [ "\$drained" -lt 256 ]; do
+    if IFS= read -r -s -n 1 _ch < "\$tty_path"; then
+      drained=\$((drained + 1))
+      idle_polls=0
+    else
+      idle_polls=\$((idle_polls + 1))
+    fi
+  done
+
+  stty "\$old_stty" < "\$tty_path" 2>/dev/null || true
 }
 
 cleanup_terminal_after_tui() {
@@ -152,7 +175,7 @@ cleanup_session_lock() {
 
 cleanup_on_exit() {
   cleanup_session_lock
-  restore_terminal
+  cleanup_terminal_after_tui
 }
 
 trap 'cleanup_on_exit' EXIT INT TERM
