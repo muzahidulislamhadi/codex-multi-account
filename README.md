@@ -109,6 +109,7 @@ codex account1 --version
 - `remove-account` deletes only that profile directory; it never deletes shared sessions.
 - Removing the default profile requires `--force` or setting another default first.
 - Explicit `resume <session-id>` is locked so two accounts cannot open the same session ID at once.
+- Explicit `resume <session-id>` also syncs matching per-thread state, including goal metadata, from the freshest profile DB before Codex starts. Target DB backups are kept in `~/.codex-shared/state-sync-backups`.
 - `resume --last` and picker mode are not pre-locked because the selected session is unknown before Codex starts.
 - Cursor/VS Code terminals run Codex with `CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT=1` to avoid leaked CSI-u key-release sequences after quitting.
 - Profile names may contain letters, numbers, dot, underscore, and dash.

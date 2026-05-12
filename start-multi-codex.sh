@@ -114,6 +114,7 @@ REAL_CODEX="$real_codex"
 ACCOUNTS_HOME="\${CODEX_MULTI_ACCOUNTS_HOME:-\$HOME/.codex-accounts}"
 SHARED_SESSIONS="\${CODEX_MULTI_SHARED_SESSIONS:-\$HOME/.codex-shared/sessions}"
 SESSION_LOCKS="\${CODEX_MULTI_SESSION_LOCKS:-\$HOME/.codex-shared/session-locks}"
+STATE_SYNC_BACKUPS="\${CODEX_MULTI_STATE_SYNC_BACKUPS:-\$HOME/.codex-shared/state-sync-backups}"
 DEFAULT_PROFILE_FILE="\${CODEX_MULTI_DEFAULT_PROFILE_FILE:-\$HOME/.codex-default-profile}"
 ACTIVE_SESSION_LOCK=""
 
@@ -336,6 +337,178 @@ resume_session_arg() {
   return 1
 }
 
+sql_quote() {
+  local value="\${1:-}"
+  value="\${value//\'/\'\'}"
+  printf "'%s'" "\$value"
+}
+
+sqlite_scalar() {
+  local db="\$1" sql="\$2"
+  sqlite3 -readonly "\$db" "\$sql" 2>/dev/null || true
+}
+
+sqlite_table_sql() {
+  local db="\$1" table="\$2"
+  sqlite_scalar "\$db" "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = \$(sql_quote "\$table");"
+}
+
+sqlite_table_exists() {
+  local db="\$1" table="\$2" exists
+  exists="\$(sqlite_scalar "\$db" "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = \$(sql_quote "\$table");")"
+  [ "\$exists" = "1" ]
+}
+
+sqlite_tables_match() {
+  local left_db="\$1" right_db="\$2" table="\$3" left_sql right_sql
+  left_sql="\$(sqlite_table_sql "\$left_db" "\$table")"
+  right_sql="\$(sqlite_table_sql "\$right_db" "\$table")"
+  [ -n "\$left_sql" ] && [ "\$left_sql" = "\$right_sql" ]
+}
+
+state_db_candidate_score() {
+  local db="\$1" session_id="\$2" sid
+  [ -f "\$db" ] || return 0
+  sqlite_table_exists "\$db" threads || return 0
+  sid="\$(sql_quote "\$session_id")"
+  if sqlite_table_exists "\$db" thread_goals; then
+    sqlite_scalar "\$db" "SELECT
+      CASE
+        WHEN EXISTS (SELECT 1 FROM thread_goals WHERE thread_id = \$sid) THEN 2
+        WHEN EXISTS (SELECT 1 FROM threads WHERE id = \$sid) THEN 1
+        ELSE 0
+      END || '|' || COALESCE(
+        (SELECT updated_at_ms FROM thread_goals WHERE thread_id = \$sid),
+        (SELECT updated_at_ms FROM threads WHERE id = \$sid),
+        (SELECT updated_at * 1000 FROM threads WHERE id = \$sid),
+        0
+      );"
+  else
+    sqlite_scalar "\$db" "SELECT
+      CASE WHEN EXISTS (SELECT 1 FROM threads WHERE id = \$sid) THEN 1 ELSE 0 END
+      || '|' || COALESCE(
+        (SELECT updated_at_ms FROM threads WHERE id = \$sid),
+        (SELECT updated_at * 1000 FROM threads WHERE id = \$sid),
+        0
+      );"
+  fi
+}
+
+find_resume_state_source_db() {
+  local target_acct="\$1" session_id="\$2" target_db="\$3"
+  local path acct db score updated best_db="" best_score=0 best_updated=0
+  mkdir -p "\$ACCOUNTS_HOME"
+  for path in "\$ACCOUNTS_HOME"/*; do
+    [ -d "\$path" ] || continue
+    acct="\${path##*/}"
+    [ "\$acct" != "\$target_acct" ] || continue
+    is_profile_name "\$acct" || continue
+    db="\$path/state_5.sqlite"
+    [ -f "\$db" ] || continue
+    sqlite_tables_match "\$target_db" "\$db" threads || continue
+    score="\$(state_db_candidate_score "\$db" "\$session_id")"
+    case "\$score" in *'|'*) ;; *) continue ;; esac
+    updated="\${score#*|}"
+    score="\${score%%|*}"
+    case "\$score" in ''|*[!0-9]*) continue ;; esac
+    case "\$updated" in ''|*[!0-9]*) updated=0 ;; esac
+    if [ "\$score" -eq 2 ] && ! sqlite_tables_match "\$target_db" "\$db" thread_goals; then
+      score=1
+    fi
+    [ "\$score" -gt 0 ] || continue
+    if [ "\$score" -gt "\$best_score" ] || { [ "\$score" -eq "\$best_score" ] && [ "\$updated" -gt "\$best_updated" ]; }; then
+      best_db="\$db"
+      best_score="\$score"
+      best_updated="\$updated"
+    fi
+  done
+  [ -n "\$best_db" ] && printf '%s\\n' "\$best_db"
+}
+
+backup_state_db() {
+  local target_db="\$1" acct="\$2" session_id="\$3" backup_dir backup_path ts safe_session
+  ts="\$(date +%Y%m%d-%H%M%S 2>/dev/null || date +%s)"
+  safe_session="\${session_id//[^A-Za-z0-9._-]/_}"
+  backup_dir="\$STATE_SYNC_BACKUPS/\$acct"
+  backup_path="\$backup_dir/state_5-before-\$safe_session-\$ts-\$\$.sqlite"
+  mkdir -p "\$backup_dir"
+  chmod 700 "\$STATE_SYNC_BACKUPS" "\$backup_dir" 2>/dev/null || true
+  sqlite3 "\$target_db" ".timeout 5000" ".backup \$(sql_quote "\$backup_path")" >/dev/null
+  chmod 600 "\$backup_path" 2>/dev/null || true
+}
+
+append_table_sync_sql() {
+  local target_db="\$1" source_db="\$2" table="\$3" session_id="\$4" sid
+  sqlite_tables_match "\$target_db" "\$source_db" "\$table" || return 0
+  sid="\$(sql_quote "\$session_id")"
+  case "\$table" in
+    threads)
+      printf 'INSERT OR IGNORE INTO threads SELECT * FROM src.threads WHERE id = %s;\\n' "\$sid"
+      ;;
+    thread_goals)
+      printf 'INSERT OR IGNORE INTO thread_goals SELECT * FROM src.thread_goals WHERE thread_id = %s;\\n' "\$sid"
+      printf 'UPDATE thread_goals SET\\n'
+      printf '  goal_id = (SELECT goal_id FROM src.thread_goals WHERE thread_id = %s),\\n' "\$sid"
+      printf '  objective = (SELECT objective FROM src.thread_goals WHERE thread_id = %s),\\n' "\$sid"
+      printf '  status = (SELECT status FROM src.thread_goals WHERE thread_id = %s),\\n' "\$sid"
+      printf '  token_budget = (SELECT token_budget FROM src.thread_goals WHERE thread_id = %s),\\n' "\$sid"
+      printf '  tokens_used = (SELECT tokens_used FROM src.thread_goals WHERE thread_id = %s),\\n' "\$sid"
+      printf '  time_used_seconds = (SELECT time_used_seconds FROM src.thread_goals WHERE thread_id = %s),\\n' "\$sid"
+      printf '  created_at_ms = (SELECT created_at_ms FROM src.thread_goals WHERE thread_id = %s),\\n' "\$sid"
+      printf '  updated_at_ms = (SELECT updated_at_ms FROM src.thread_goals WHERE thread_id = %s)\\n' "\$sid"
+      printf 'WHERE thread_id = %s\\n' "\$sid"
+      printf '  AND EXISTS (SELECT 1 FROM src.thread_goals WHERE thread_id = %s)\\n' "\$sid"
+      printf '  AND (SELECT updated_at_ms FROM src.thread_goals WHERE thread_id = %s) > updated_at_ms;\\n' "\$sid"
+      ;;
+    thread_dynamic_tools)
+      printf 'INSERT OR IGNORE INTO thread_dynamic_tools SELECT * FROM src.thread_dynamic_tools WHERE thread_id = %s;\\n' "\$sid"
+      ;;
+    stage1_outputs)
+      printf 'INSERT OR IGNORE INTO stage1_outputs SELECT * FROM src.stage1_outputs WHERE thread_id = %s;\\n' "\$sid"
+      ;;
+    thread_spawn_edges)
+      printf 'INSERT OR IGNORE INTO thread_spawn_edges SELECT * FROM src.thread_spawn_edges WHERE parent_thread_id = %s OR child_thread_id = %s;\\n' "\$sid" "\$sid"
+      ;;
+  esac
+}
+
+sync_resume_state() {
+  local acct="\$1" session_id="\$2" target_db source_db sql table table_sql
+  [ -n "\$session_id" ] || return 0
+  command -v sqlite3 >/dev/null 2>&1 || {
+    echo "codex: sqlite3 not found; skipping cross-profile resume state sync." >&2
+    return 0
+  }
+  target_db="\$ACCOUNTS_HOME/\$acct/state_5.sqlite"
+  [ -f "\$target_db" ] || return 0
+  source_db="\$(find_resume_state_source_db "\$acct" "\$session_id" "\$target_db" || true)"
+  [ -n "\$source_db" ] || return 0
+  [ "\$source_db" != "\$target_db" ] || return 0
+
+  if ! sqlite_tables_match "\$target_db" "\$source_db" threads; then
+    echo "codex: found resume state in another profile, but thread schemas differ; skipping state sync." >&2
+    return 0
+  fi
+
+  if ! backup_state_db "\$target_db" "\$acct" "\$session_id"; then
+    echo "codex: could not back up \$target_db; skipping cross-profile resume state sync." >&2
+    return 0
+  fi
+
+  sql="PRAGMA busy_timeout = 5000;\\nATTACH DATABASE \$(sql_quote "\$source_db") AS src;\\n"
+  for table in threads thread_goals thread_dynamic_tools stage1_outputs thread_spawn_edges; do
+    table_sql="\$(append_table_sync_sql "\$target_db" "\$source_db" "\$table" "\$session_id")"
+    [ -n "\$table_sql" ] || continue
+    sql="\$sql\$table_sql"
+  done
+  sql="\$sql DETACH DATABASE src;\\n"
+
+  if ! printf '%b' "\$sql" | sqlite3 "\$target_db" >/dev/null; then
+    echo "codex: cross-profile resume state sync failed; target backup was kept under \$STATE_SYNC_BACKUPS." >&2
+    return 0
+  fi
+}
+
 lock_owner_pid() { [ -f "\$1/pid" ] && sed -n '1p' "\$1/pid" 2>/dev/null || true; }
 
 pid_is_alive() {
@@ -411,10 +584,14 @@ acquire_session_lock() {
 }
 
 run_codex() {
-  local acct="\$1" real status
+  local acct="\$1" real status session_id
   shift
   real="\$(resolve_real_codex)" || { echo "codex: official Codex binary not found." >&2; return 127; }
   acquire_session_lock "\$acct" "\$@"
+  session_id="\$(resume_session_arg "\$@" || true)"
+  if [ -n "\$session_id" ]; then
+    sync_resume_state "\$acct" "\$session_id"
+  fi
   set +e
   if [ "\${TERM_PROGRAM:-}" = "vscode" ]; then
     env CODEX_HOME="\$ACCOUNTS_HOME/\$acct" CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT=1 "\$real" "\$@"

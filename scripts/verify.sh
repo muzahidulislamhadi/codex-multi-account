@@ -28,15 +28,37 @@ run_start() {
 }
 
 run_codex() {
-  HOME="$TEST_HOME" TERM_PROGRAM= PATH="$TEST_HOME/.local/bin:$TEST_HOME/bin:/usr/bin:/bin" "$TEST_HOME/.local/bin/codex" "$@"
+  env -u CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT HOME="$TEST_HOME" TERM_PROGRAM= PATH="$TEST_HOME/.local/bin:$TEST_HOME/bin:/usr/bin:/bin" "$TEST_HOME/.local/bin/codex" "$@"
 }
 
 run_codex_vscode() {
-  HOME="$TEST_HOME" TERM_PROGRAM=vscode PATH="$TEST_HOME/.local/bin:$TEST_HOME/bin:/usr/bin:/bin" "$TEST_HOME/.local/bin/codex" "$@"
+  env -u CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT HOME="$TEST_HOME" TERM_PROGRAM=vscode PATH="$TEST_HOME/.local/bin:$TEST_HOME/bin:/usr/bin:/bin" "$TEST_HOME/.local/bin/codex" "$@"
 }
 
 run_clean() {
   HOME="$TEST_HOME" TERM_PROGRAM= PATH="$TEST_HOME/.local/bin:$TEST_HOME/bin:/usr/bin:/bin" "$ROOT/clean-multi-codex.sh" "$@"
+}
+
+create_resume_state_db() {
+  local db="$1"
+  sqlite3 "$db" <<'SQL'
+CREATE TABLE threads (
+  id TEXT PRIMARY KEY,
+  updated_at INTEGER NOT NULL,
+  updated_at_ms INTEGER
+);
+CREATE TABLE thread_goals (
+  thread_id TEXT PRIMARY KEY NOT NULL,
+  goal_id TEXT NOT NULL,
+  objective TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('active', 'paused', 'budget_limited', 'complete')),
+  token_budget INTEGER,
+  tokens_used INTEGER NOT NULL DEFAULT 0,
+  time_used_seconds INTEGER NOT NULL DEFAULT 0,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
+SQL
 }
 
 run_start >/tmp/codex-multi-account-start.out
@@ -70,6 +92,20 @@ run_codex as secondacc --version >/tmp/codex-multi-account-second.out 2>/tmp/cod
 [ -d "$TEST_HOME/.codex-accounts/secondacc" ]
 run_codex remove-account secondacc >/tmp/codex-multi-account-remove-second.out
 [ ! -e "$TEST_HOME/.codex-accounts/secondacc" ]
+
+run_codex as goalowner --version >/tmp/codex-multi-account-goalowner.out
+run_codex as goalreader --version >/tmp/codex-multi-account-goalreader.out
+create_resume_state_db "$TEST_HOME/.codex-accounts/goalowner/state_5.sqlite"
+create_resume_state_db "$TEST_HOME/.codex-accounts/goalreader/state_5.sqlite"
+sqlite3 "$TEST_HOME/.codex-accounts/goalowner/state_5.sqlite" <<'SQL'
+INSERT INTO threads VALUES ('goal-thread-1', 1000, 1000000);
+INSERT INTO thread_goals VALUES ('goal-thread-1', 'goal-id-1', 'sync this goal', 'paused', NULL, 123, 45, 900000, 1000000);
+SQL
+
+run_codex goalreader resume goal-thread-1 >/tmp/codex-multi-account-resume-sync.out
+grep -q 'fake-codex resume goal-thread-1' /tmp/codex-multi-account-resume-sync.out
+[ "$(sqlite3 "$TEST_HOME/.codex-accounts/goalreader/state_5.sqlite" "SELECT status || ':' || tokens_used FROM thread_goals WHERE thread_id = 'goal-thread-1';")" = "paused:123" ]
+find "$TEST_HOME/.codex-shared/state-sync-backups/goalreader" -name 'state_5-before-goal-thread-1-*.sqlite' | grep -q .
 
 set +e
 run_codex remove-account firstacc >/tmp/codex-multi-account-remove-default.out 2>&1
