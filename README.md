@@ -37,6 +37,7 @@ codex resume
 # list / inspect / remove
 codex accounts
 codex account-home account1
+codex profile-env account1
 codex shared-sessions
 codex remove-account account2
 codex remove-account account1 --force
@@ -119,7 +120,49 @@ codex account1 --version
 - `resume --last` and picker mode are not pre-locked because the selected session is unknown before Codex starts.
 - Cursor/VS Code terminals run Codex with `CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT=1` to avoid leaked CSI-u key-release sequences after quitting.
 - After updating the official Codex CLI, close long-lived Codex/app-server/exec-server processes and run `codex upgrade-cleanup` so old runtime/tool caches are rebuilt by the new Codex binary.
+- A profile's `profile.env` is exported for that profile only; see [Per-Profile Environment](#per-profile-environment).
 - Profile names may contain letters, numbers, dot, underscore, and dash.
+
+## Per-Profile Environment
+
+Each profile can carry its own environment variables in `~/.codex-accounts/<profile>/profile.env`. The wrapper exports them just before launching that profile, so a variable set for one account never leaks into the others or into your shell.
+
+```bash
+printf 'AI_GATEWAY_API_KEY=%s\n' "$KEY" > "$(codex profile-env account1)"
+chmod 600 "$(codex profile-env account1)"
+```
+
+The file holds `KEY=value` lines. Blank lines and `#` comments are skipped, a leading `export ` is allowed, and matching single or double quotes around a value are stripped. Values are never evaluated as shell, so `$OTHER` and backticks stay literal. The wrapper warns when the file is readable beyond its owner.
+
+This lets one profile authenticate against an OpenAI-compatible endpoint with an API key while your other profiles keep their normal Codex logins. For example, a profile backed by an API gateway:
+
+`~/.codex-accounts/gateway/profile.env`
+
+```bash
+AI_GATEWAY_API_KEY=your_key_here
+```
+
+`~/.codex-accounts/gateway/config.toml`
+
+```toml
+model = "openai/gpt-5.3-codex"
+model_provider = "gateway"
+
+[model_providers.gateway]
+name = "API Gateway"
+base_url = "https://example-gateway/v1"
+env_key = "AI_GATEWAY_API_KEY"
+wire_api = "responses"
+```
+
+Such a profile needs no `codex login`, so `codex accounts` lists it as `not-logged-in` even though it works. Use `wire_api = "responses"` when the endpoint supports the Responses API, and `"chat"` for Chat Completions only.
+
+Codex prints `Model metadata for ... not found` for any model name outside its built-in registry, including gateway-prefixed names. It is harmless, but set the limits yourself so the fallback values are not used:
+
+```toml
+model_context_window = 400000
+model_auto_compact_token_limit = 340000
+```
 
 ## Upgrade Canary
 

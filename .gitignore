@@ -5,4 +5,5 @@ tmp/
 .codex-accounts/
 .codex-shared/
 .codex-default-profile
+profile.env
 gitdir/

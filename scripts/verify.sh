@@ -19,6 +19,8 @@ if [ "${1:-}" = "--version" ]; then
 fi
 echo "fake-codex $*"
 echo "keyboard-enhancement=${CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT:-unset}"
+echo "gateway-key=${TEST_GATEWAY_KEY:-unset}"
+echo "quoted-key=${TEST_QUOTED_KEY:-unset}"
 FAKE
 chmod +x "$TEST_HOME/bin/codex"
 cat > "$TEST_HOME/bin/alternate-codex" <<'FAKE'
@@ -193,6 +195,36 @@ grep -q 'Codex runtime cache path' /tmp/codex-multi-account-upgrade-cleanup.out
 [ ! -e "$TEST_HOME/.codex-accounts/goalreader/.tmp/plugins.sync.lock" ]
 [ ! -e "$TEST_HOME/.codex-accounts/goalreader/.tmp/plugins.sha" ]
 [ ! -e "$TEST_HOME/.codex-accounts/goalreader/app-server-control" ]
+
+run_codex as envacc --version >/tmp/codex-multi-account-envacc.out
+run_codex as plainacc --version >/tmp/codex-multi-account-plainacc.out
+
+[ "$(run_codex profile-env envacc)" = "$TEST_HOME/.codex-accounts/envacc/profile.env" ]
+
+cat > "$TEST_HOME/.codex-accounts/envacc/profile.env" <<'ENVFILE'
+# gateway credentials for this profile only
+TEST_GATEWAY_KEY=vck_test_value
+  export TEST_QUOTED_KEY="quoted value"
+bad-name=ignored
+ENVFILE
+chmod 600 "$TEST_HOME/.codex-accounts/envacc/profile.env"
+
+run_codex envacc --version >/tmp/codex-multi-account-envacc-run.out 2>/tmp/codex-multi-account-envacc-run.err
+grep -q 'gateway-key=vck_test_value' /tmp/codex-multi-account-envacc-run.out
+grep -q 'quoted-key=quoted value' /tmp/codex-multi-account-envacc-run.out
+grep -q 'ignoring invalid variable name' /tmp/codex-multi-account-envacc-run.err
+
+run_codex plainacc --version >/tmp/codex-multi-account-plainacc-run.out
+grep -q 'gateway-key=unset' /tmp/codex-multi-account-plainacc-run.out
+grep -q 'quoted-key=unset' /tmp/codex-multi-account-plainacc-run.out
+
+chmod 644 "$TEST_HOME/.codex-accounts/envacc/profile.env"
+run_codex envacc --version >/dev/null 2>/tmp/codex-multi-account-envacc-perms.err
+grep -q 'readable beyond its owner' /tmp/codex-multi-account-envacc-perms.err
+chmod 600 "$TEST_HOME/.codex-accounts/envacc/profile.env"
+
+run_codex remove-account envacc >/dev/null
+run_codex remove-account plainacc >/dev/null
 
 set +e
 run_codex remove-account firstacc >/tmp/codex-multi-account-remove-default.out 2>&1
