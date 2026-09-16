@@ -116,6 +116,7 @@ SHARED_SESSIONS="\${CODEX_MULTI_SHARED_SESSIONS:-\$HOME/.codex-shared/sessions}"
 SESSION_LOCKS="\${CODEX_MULTI_SESSION_LOCKS:-\$HOME/.codex-shared/session-locks}"
 STATE_SYNC_BACKUPS="\${CODEX_MULTI_STATE_SYNC_BACKUPS:-\$HOME/.codex-shared/state-sync-backups}"
 DEFAULT_PROFILE_FILE="\${CODEX_MULTI_DEFAULT_PROFILE_FILE:-\$HOME/.codex-default-profile}"
+PROFILE_ENV_NAME="\${CODEX_MULTI_PROFILE_ENV_NAME:-profile.env}"
 ACTIVE_SESSION_LOCK=""
 
 current_tty_path() {
@@ -159,7 +160,7 @@ trap 'cleanup_on_exit' EXIT INT TERM
 
 is_reserved_command() {
   case "\${1:-}" in
-    ""|as|profile|use|default|accounts|remove-account|delete-account|account-home|sessions-home|shared-sessions|locks|clear-stale-locks|upgrade-cleanup|real|help|\\
+    ""|as|profile|use|default|accounts|remove-account|delete-account|account-home|profile-env|sessions-home|shared-sessions|locks|clear-stale-locks|upgrade-cleanup|real|help|\\
 exec|e|review|login|logout|mcp|plugin|mcp-server|app-server|remote-control|completion|update|sandbox|debug|apply|a|resume|fork|cloud|exec-server|features)
       return 0 ;;
     *) return 1 ;;
@@ -742,6 +743,43 @@ acquire_session_lock() {
   ACTIVE_SESSION_LOCK="\$lock_dir"
 }
 
+load_profile_env() {
+  local acct="\$1" env_file line key value perms first last
+  env_file="\$ACCOUNTS_HOME/\$acct/\$PROFILE_ENV_NAME"
+  [ -f "\$env_file" ] || return 0
+
+  perms="\$(stat -c '%a' "\$env_file" 2>/dev/null || true)"
+  case "\$perms" in
+    ''|*00) ;;
+    *) echo "codex: warning: \$env_file is readable beyond its owner (mode \$perms); run: chmod 600 \$env_file" >&2 ;;
+  esac
+
+  while IFS= read -r line || [ -n "\$line" ]; do
+    line="\${line%\$'\\r'}"
+    line="\${line#"\${line%%[![:space:]]*}"}"
+    case "\$line" in
+      ''|'#'*) continue ;;
+    esac
+    line="\${line#export }"
+    key="\${line%%=*}"
+    [ "\$key" != "\$line" ] || continue
+    value="\${line#*=}"
+    case "\$key" in
+      ''|*[!A-Za-z0-9_]*)
+        echo "codex: ignoring invalid variable name in \$env_file: \$key" >&2
+        continue ;;
+    esac
+    if [ "\${#value}" -ge 2 ]; then
+      first="\${value:0:1}"
+      last="\${value: -1}"
+      if { [ "\$first" = '"' ] && [ "\$last" = '"' ]; } || { [ "\$first" = "'" ] && [ "\$last" = "'" ]; }; then
+        value="\${value:1:\${#value}-2}"
+      fi
+    fi
+    export "\$key=\$value"
+  done < "\$env_file"
+}
+
 run_codex() {
   local acct="\$1" real status session_id current_version current_version_key
   local -a codex_args
@@ -759,6 +797,7 @@ run_codex() {
   if ! has_working_directory_arg "\${codex_args[@]}"; then
     codex_args=(--cd "\$PWD" "\${codex_args[@]}")
   fi
+  load_profile_env "\$acct"
   set +e
   if [ "\${TERM_PROGRAM:-}" = "vscode" ]; then
     env CODEX_HOME="\$ACCOUNTS_HOME/\$acct" CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT=1 "\$real" "\${codex_args[@]}"
@@ -788,6 +827,10 @@ case "\${1:-}" in
     [ -n "\${2:-}" ] || { echo "Usage: codex account-home <profile>" >&2; exit 1; }
     is_profile_name "\$2" || { echo "codex: invalid profile name: \$2" >&2; exit 1; }
     echo "\$ACCOUNTS_HOME/\$2" ;;
+  profile-env)
+    [ -n "\${2:-}" ] || { echo "Usage: codex profile-env <profile>" >&2; exit 1; }
+    is_profile_name "\$2" || { echo "codex: invalid profile name: \$2" >&2; exit 1; }
+    echo "\$ACCOUNTS_HOME/\$2/\$PROFILE_ENV_NAME" ;;
   sessions-home|shared-sessions) echo "\$SHARED_SESSIONS" ;;
   locks) list_session_locks ;;
   clear-stale-locks) clear_stale_session_locks ;;
@@ -805,6 +848,7 @@ Usage:
   codex accounts                List profiles and login status
   codex remove-account <name>   Remove a profile, but never shared sessions
   codex account-home <profile>  Print a profile CODEX_HOME
+  codex profile-env <profile>   Print a profile env-file path
   codex shared-sessions         Print shared sessions directory
   codex locks                   List active/stale explicit-resume locks
   codex clear-stale-locks       Remove stale explicit-resume locks
@@ -812,6 +856,11 @@ Usage:
 
 Set CODEX_MULTI_REAL_CODEX to test a specific official Codex binary without
 changing the global install used by every profile.
+
+Each profile may keep a profile.env file in its CODEX_HOME holding KEY=value
+lines. The wrapper exports them for that profile only, so one profile can use
+an API-key provider while the others keep their own credentials. Keep the file
+readable by the owner only (chmod 600).
 
 Profile names may contain only letters, numbers, dot, underscore, and dash.
 Unknown first words are passed to the official Codex binary through the default
