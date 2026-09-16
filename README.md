@@ -134,35 +134,41 @@ chmod 600 "$(codex profile-env account1)"
 
 The file holds `KEY=value` lines. Blank lines and `#` comments are skipped, a leading `export ` is allowed, and matching single or double quotes around a value are stripped. Values are never evaluated as shell, so `$OTHER` and backticks stay literal. The wrapper warns when the file is readable beyond its owner.
 
-This lets one profile authenticate against an OpenAI-compatible endpoint with an API key while your other profiles keep their normal Codex logins. For example, a profile backed by an API gateway:
-
-`~/.codex-accounts/gateway/profile.env`
+This lets one profile authenticate against an OpenAI-compatible endpoint with an API key while your other profiles keep their normal Codex logins. A complete worked example, using Vercel AI Gateway:
 
 ```bash
-AI_GATEWAY_API_KEY=your_key_here
+codex as vercel     # creates ~/.codex-accounts/vercel; quit the TUI once it opens
+printf 'AI_GATEWAY_API_KEY=%s\n' "$KEY" > "$(codex profile-env vercel)"
+chmod 600 "$(codex profile-env vercel)"
 ```
 
-`~/.codex-accounts/gateway/config.toml`
+`~/.codex-accounts/vercel/config.toml`
 
 ```toml
-model = "openai/gpt-5.3-codex"
-model_provider = "gateway"
+model = "openai/gpt-5.6-sol"
+model_provider = "vercel"
+model_context_window = 1050000
+model_auto_compact_token_limit = 890000
+model_reasoning_effort = "high"
 
-[model_providers.gateway]
-name = "API Gateway"
-base_url = "https://example-gateway/v1"
+[model_providers.vercel]
+name = "Vercel AI Gateway"
+base_url = "https://ai-gateway.vercel.sh/v1"
 env_key = "AI_GATEWAY_API_KEY"
 wire_api = "responses"
 ```
 
-Such a profile needs no `codex login`, so `codex accounts` lists it as `not-logged-in` even though it works. Use `wire_api = "responses"` when the endpoint supports the Responses API, and `"chat"` for Chat Completions only.
-
-Codex prints `Model metadata for ... not found` for any model name outside its built-in registry, including gateway-prefixed names. It is harmless, but set the limits yourself so the fallback values are not used:
-
-```toml
-model_context_window = 400000
-model_auto_compact_token_limit = 340000
+```bash
+codex vercel exec --skip-git-repo-check "Reply with exactly: GATEWAY_OK"
 ```
+
+Points that apply to any API gateway:
+
+- Such a profile needs no `codex login`, so `codex accounts` lists it as `not-logged-in` even though it works.
+- Use `wire_api = "responses"` when the endpoint supports the Responses API, and `"chat"` for Chat Completions only. Vercel AI Gateway serves both under `/v1`.
+- Vercel addresses models as `creator/model-name`, and the key carries no default model, so `model` must always be set.
+- `service_tier` is OpenAI-platform-specific; drop it unless the gateway documents support for it.
+- Set the context limits yourself. Codex prints `Model metadata for ... not found` for any model outside its built-in registry and otherwise falls back to conservative defaults.
 
 ## Upgrade Canary
 
