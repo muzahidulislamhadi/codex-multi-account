@@ -152,6 +152,7 @@ chmod 600 "$(codex profile-env vercel)"
 ```toml
 model = "openai/gpt-5.6-sol"
 model_provider = "vercel"
+openai_base_url = "https://ai-gateway.vercel.sh/v1"
 model_context_window = 1050000
 model_auto_compact_token_limit = 890000
 model_reasoning_effort = "high"
@@ -163,18 +164,27 @@ env_key = "AI_GATEWAY_API_KEY"
 wire_api = "responses"
 ```
 
+Store the same key as the profile's API-key credential, so the built-in provider can reach the gateway too:
+
+```bash
+printf '%s' "$KEY" | codex vercel login --with-api-key
+```
+
 ```bash
 codex vercel exec --skip-git-repo-check "Reply with exactly: GATEWAY_OK"
+codex vercel exec -c model_provider=openai --skip-git-repo-check "Reply with exactly: BUILTIN_OK"
 ```
+
+The second command is the belt-and-braces check: `[model_providers.vercel]` plus `env_key` covers everything the profile runs normally, while `openai_base_url` plus the stored API key catches anything that still asks for the built-in `openai` provider — an imported session, a `-c` override, a Codex surface that ignores the configured provider. Both land on the gateway, so there is no path left that reaches `api.openai.com`.
 
 Points that apply to any API gateway:
 
-- Such a profile needs no `codex login`, so `codex accounts` lists it as `not-logged-in` even though it works.
+- Such a profile needs no `codex login` to work; without one `codex accounts` lists it as `not-logged-in`. Logging the gateway key in with `--with-api-key`, as above, is what makes it read `logged-in`.
 - Use `wire_api = "responses"` when the endpoint supports the Responses API, and `"chat"` for Chat Completions only. Vercel AI Gateway serves both under `/v1`.
 - Vercel addresses models as `creator/model-name`, and the key carries no default model, so `model` must always be set.
 - `service_tier` is OpenAI-platform-specific; drop it unless the gateway documents support for it.
 - Set the context limits yourself. Codex prints `Model metadata for ... not found` for any model outside its built-in registry and otherwise falls back to conservative defaults.
-- Built-in provider ids (`openai`, and the local-model ids) are reserved, so `[model_providers.openai]` is rejected with `Built-in providers cannot be overridden`. Give the gateway its own id, as above. If you would rather keep the built-in provider and only move its endpoint, Codex has a dedicated top-level `openai_base_url` key for that, and it then authenticates from `auth.json` (`codex login --with-api-key`) rather than from `env_key`. Note that `openai_base_url` is honoured only in a `CODEX_HOME` `config.toml`, never in a project-local `.codex/config.toml`.
+- Built-in provider ids (`openai`, and the local-model ids) are reserved, so `[model_providers.openai]` is rejected with `Built-in providers cannot be overridden`. `openai_base_url` is the supported key for moving the built-in provider's endpoint, and it authenticates from `auth.json` (`codex login --with-api-key`) rather than from `env_key`. It is honoured only in a `CODEX_HOME` `config.toml`, never in a project-local `.codex/config.toml`.
 - `OPENAI_BASE_URL` and `OPENAI_API_KEY` are not read by Codex at runtime. Provider credentials come from the provider's `env_key`, which the wrapper supplies from `profile.env`.
 
 ## Provider Alignment
@@ -196,6 +206,8 @@ codex align-providers          # every profile
 ```
 
 Each profile is backed up to `~/.codex-shared/state-sync-backups/<profile>` before it is rewritten, and profiles whose threads already match are left untouched. Override the fallback provider id with `CODEX_MULTI_DEFAULT_MODEL_PROVIDER`.
+
+Alignment fixes the stored provider id. Pair it with `openai_base_url` and an API-key login on the gateway profile, as in the recipe above, and the built-in `openai` provider reaches the gateway as well — so a thread that slips through unaligned still works instead of returning 401.
 
 This reads a Codex-internal database (`<profile>/state_5.sqlite`). The location is stable but the schema is not documented, so the wrapper checks for the table and column first and does nothing when either is missing — a future Codex release may need this updated.
 
