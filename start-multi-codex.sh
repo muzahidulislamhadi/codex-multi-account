@@ -117,6 +117,7 @@ SESSION_LOCKS="\${CODEX_MULTI_SESSION_LOCKS:-\$HOME/.codex-shared/session-locks}
 STATE_SYNC_BACKUPS="\${CODEX_MULTI_STATE_SYNC_BACKUPS:-\$HOME/.codex-shared/state-sync-backups}"
 DEFAULT_PROFILE_FILE="\${CODEX_MULTI_DEFAULT_PROFILE_FILE:-\$HOME/.codex-default-profile}"
 PROFILE_ENV_NAME="\${CODEX_MULTI_PROFILE_ENV_NAME:-profile.env}"
+DEFAULT_MODEL_PROVIDER="\${CODEX_MULTI_DEFAULT_MODEL_PROVIDER:-openai}"
 ACTIVE_SESSION_LOCK=""
 
 current_tty_path() {
@@ -160,7 +161,7 @@ trap 'cleanup_on_exit' EXIT INT TERM
 
 is_reserved_command() {
   case "\${1:-}" in
-    ""|as|profile|use|default|accounts|remove-account|delete-account|account-home|profile-env|sessions-home|shared-sessions|locks|clear-stale-locks|upgrade-cleanup|real|help|\\
+    ""|as|profile|use|default|accounts|remove-account|delete-account|account-home|profile-env|sessions-home|shared-sessions|locks|clear-stale-locks|upgrade-cleanup|align-providers|real|help|\\
 exec|e|review|login|logout|mcp|plugin|mcp-server|app-server|remote-control|completion|update|sandbox|debug|apply|a|resume|fork|cloud|exec-server|features)
       return 0 ;;
     *) return 1 ;;
@@ -368,6 +369,12 @@ sqlite_table_sql() {
 sqlite_table_exists() {
   local db="\$1" table="\$2" exists
   exists="\$(sqlite_scalar "\$db" "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = \$(sql_quote "\$table");")"
+  [ "\$exists" = "1" ]
+}
+
+sqlite_column_exists() {
+  local db="\$1" table="\$2" column="\$3" exists
+  exists="\$(sqlite_scalar "\$db" "SELECT count(*) FROM pragma_table_info(\$(sql_quote "\$table")) WHERE name = \$(sql_quote "\$column");")"
   [ "\$exists" = "1" ]
 }
 
@@ -642,6 +649,96 @@ DETACH DATABASE src;"
   fi
 }
 
+profile_model_provider() {
+  local acct="\$1" config line key value
+  config="\$ACCOUNTS_HOME/\$acct/config.toml"
+  if [ -f "\$config" ]; then
+    while IFS= read -r line || [ -n "\$line" ]; do
+      line="\${line%\$'\\r'}"
+      line="\${line#"\${line%%[![:space:]]*}"}"
+      case "\$line" in
+        '['*) break ;;
+        ''|'#'*) continue ;;
+      esac
+      key="\${line%%=*}"
+      [ "\$key" != "\$line" ] || continue
+      key="\${key%"\${key##*[![:space:]]}"}"
+      [ "\$key" = "model_provider" ] || continue
+      value="\${line#*=}"
+      value="\${value#"\${value%%[![:space:]]*}"}"
+      value="\${value%"\${value##*[![:space:]]}"}"
+      case "\$value" in
+        '"'*'"'|"'"*"'") value="\${value:1:\${#value}-2}" ;;
+      esac
+      if [ -n "\$value" ]; then
+        printf '%s\\n' "\$value"
+        return 0
+      fi
+    done < "\$config"
+  fi
+  printf '%s\\n' "\$DEFAULT_MODEL_PROVIDER"
+}
+
+stamp_thread_provider() {
+  local acct="\$1" session_id="\$2" db provider sid
+  [ -n "\$session_id" ] || return 0
+  command -v sqlite3 >/dev/null 2>&1 || return 0
+  db="\$ACCOUNTS_HOME/\$acct/state_5.sqlite"
+  [ -f "\$db" ] || return 0
+  sqlite_table_exists "\$db" threads || return 0
+  sqlite_column_exists "\$db" threads model_provider || return 0
+  provider="\$(profile_model_provider "\$acct")"
+  [ -n "\$provider" ] || return 0
+  sid="\$(sql_quote "\$session_id")"
+  if ! printf 'PRAGMA busy_timeout = 5000;\\nUPDATE threads SET model_provider = %s WHERE id = %s AND model_provider IS NOT %s;\\n' \\
+      "\$(sql_quote "\$provider")" "\$sid" "\$(sql_quote "\$provider")" | sqlite3 "\$db" >/dev/null 2>&1; then
+    echo "codex: could not align session \$session_id with provider '\$provider'; Codex may resume it on the wrong provider." >&2
+  fi
+}
+
+align_profile_providers() {
+  local only="\${1:-}" path acct db provider changed total=0 matched=0
+  command -v sqlite3 >/dev/null 2>&1 || { echo "codex: sqlite3 not found; cannot align providers." >&2; return 1; }
+  if [ -n "\$only" ]; then
+    is_profile_name "\$only" || { echo "codex: invalid profile name: \$only" >&2; return 1; }
+    [ -d "\$ACCOUNTS_HOME/\$only" ] || { echo "codex: unknown profile: \$only" >&2; return 1; }
+  fi
+  mkdir -p "\$ACCOUNTS_HOME"
+  for path in "\$ACCOUNTS_HOME"/*; do
+    [ -d "\$path" ] || continue
+    acct="\${path##*/}"
+    is_profile_name "\$acct" || continue
+    if [ -n "\$only" ] && [ "\$acct" != "\$only" ]; then
+      continue
+    fi
+    matched=1
+    db="\$path/state_5.sqlite"
+    [ -f "\$db" ] || continue
+    sqlite_table_exists "\$db" threads || continue
+    sqlite_column_exists "\$db" threads model_provider || continue
+    provider="\$(profile_model_provider "\$acct")"
+    changed="\$(sqlite_scalar "\$db" "SELECT count(*) FROM threads WHERE model_provider IS NOT \$(sql_quote "\$provider");")"
+    case "\$changed" in ''|*[!0-9]*) changed=0 ;; esac
+    if [ "\$changed" -eq 0 ]; then
+      echo "\$acct: already aligned to provider '\$provider'."
+      continue
+    fi
+    if ! backup_state_db "\$db" "\$acct" "align-providers"; then
+      echo "codex: could not back up \$db; skipping \$acct." >&2
+      continue
+    fi
+    if ! printf 'PRAGMA busy_timeout = 5000;\\nUPDATE threads SET model_provider = %s WHERE model_provider IS NOT %s;\\n' \\
+        "\$(sql_quote "\$provider")" "\$(sql_quote "\$provider")" | sqlite3 "\$db" >/dev/null 2>&1; then
+      echo "codex: provider alignment failed for \$acct; backup kept under \$STATE_SYNC_BACKUPS." >&2
+      continue
+    fi
+    echo "\$acct: \$changed thread(s) aligned to provider '\$provider'."
+    total=\$((total + changed))
+  done
+  [ "\$matched" -eq 1 ] || { echo "codex: no matching profile." >&2; return 1; }
+  echo "Aligned \$total thread(s)."
+}
+
 lock_owner_pid() { [ -f "\$1/pid" ] && sed -n '1p' "\$1/pid" 2>/dev/null || true; }
 
 pid_is_alive() {
@@ -792,6 +889,7 @@ run_codex() {
   if [ -n "\$session_id" ]; then
     sync_resume_state "\$acct" "\$session_id" "\$current_version_key"
     sync_resume_goal "\$acct" "\$session_id"
+    stamp_thread_provider "\$acct" "\$session_id"
   fi
   codex_args=("\$@")
   if ! has_working_directory_arg "\${codex_args[@]}"; then
@@ -835,6 +933,7 @@ case "\${1:-}" in
   locks) list_session_locks ;;
   clear-stale-locks) clear_stale_session_locks ;;
   upgrade-cleanup) clear_runtime_caches ;;
+  align-providers) align_profile_providers "\${2:-}" ;;
   real) resolve_real_codex ;;
   help)
     cat <<'HELP'
@@ -853,6 +952,7 @@ Usage:
   codex locks                   List active/stale explicit-resume locks
   codex clear-stale-locks       Remove stale explicit-resume locks
   codex upgrade-cleanup         Clear stale locks and Codex runtime/tool caches
+  codex align-providers [prof]  Re-stamp stored threads with the profile provider
 
 Set CODEX_MULTI_REAL_CODEX to test a specific official Codex binary without
 changing the global install used by every profile.

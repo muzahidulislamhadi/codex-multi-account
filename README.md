@@ -49,6 +49,10 @@ codex clear-stale-locks
 # upgrade cleanup
 codex upgrade-cleanup
 
+# provider alignment
+codex align-providers
+codex align-providers vercel
+
 # wrapper info
 codex help
 codex real
@@ -121,6 +125,7 @@ codex account1 --version
 - Cursor/VS Code terminals run Codex with `CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT=1` to avoid leaked CSI-u key-release sequences after quitting.
 - After updating the official Codex CLI, close long-lived Codex/app-server/exec-server processes and run `codex upgrade-cleanup` so old runtime/tool caches are rebuilt by the new Codex binary.
 - A profile's `profile.env` is exported for that profile only; see [Per-Profile Environment](#per-profile-environment).
+- Explicit `resume <session-id>` also re-stamps the resumed thread with the resuming profile's own `model_provider`; see [Provider Alignment](#provider-alignment).
 - Profile names may contain letters, numbers, dot, underscore, and dash.
 
 ## Per-Profile Environment
@@ -169,6 +174,30 @@ Points that apply to any API gateway:
 - Vercel addresses models as `creator/model-name`, and the key carries no default model, so `model` must always be set.
 - `service_tier` is OpenAI-platform-specific; drop it unless the gateway documents support for it.
 - Set the context limits yourself. Codex prints `Model metadata for ... not found` for any model outside its built-in registry and otherwise falls back to conservative defaults.
+- Built-in provider ids (`openai`, and the local-model ids) are reserved, so `[model_providers.openai]` is rejected with `Built-in providers cannot be overridden`. Give the gateway its own id, as above. If you would rather keep the built-in provider and only move its endpoint, Codex has a dedicated top-level `openai_base_url` key for that, and it then authenticates from `auth.json` (`codex login --with-api-key`) rather than from `env_key`. Note that `openai_base_url` is honoured only in a `CODEX_HOME` `config.toml`, never in a project-local `.codex/config.toml`.
+- `OPENAI_BASE_URL` and `OPENAI_API_KEY` are not read by Codex at runtime. Provider credentials come from the provider's `env_key`, which the wrapper supplies from `profile.env`.
+
+## Provider Alignment
+
+Codex records the provider a session was created with **inside the profile**, and that recorded value wins over `config.toml` when the session is resumed. A gateway profile created after the fact therefore inherits sessions marked for the built-in `openai` provider, and resuming one of them bypasses the gateway entirely:
+
+```
+Unexpected status 401 Unauthorized: Missing bearer or basic authentication in header,
+url: https://api.openai.com/v1/responses
+```
+
+The wrapper handles this automatically for `codex <profile> resume <session-id>`: after syncing the thread it re-stamps that thread with the resuming profile's own `model_provider`, defaulting to `openai` when the profile does not set one. That is symmetric, so resuming a gateway-created session under a normal ChatGPT profile sends it back to `openai`.
+
+Picker mode and `resume --last` choose the session after Codex has already started, so the wrapper cannot stamp them. Run the bulk repair once per profile instead:
+
+```bash
+codex align-providers vercel   # one profile
+codex align-providers          # every profile
+```
+
+Each profile is backed up to `~/.codex-shared/state-sync-backups/<profile>` before it is rewritten, and profiles whose threads already match are left untouched. Override the fallback provider id with `CODEX_MULTI_DEFAULT_MODEL_PROVIDER`.
+
+This reads a Codex-internal database (`<profile>/state_5.sqlite`). The location is stable but the schema is not documented, so the wrapper checks for the table and column first and does nothing when either is missing — a future Codex release may need this updated.
 
 ## Upgrade Canary
 

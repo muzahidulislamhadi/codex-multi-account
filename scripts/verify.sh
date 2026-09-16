@@ -61,7 +61,8 @@ CREATE TABLE threads (
   id TEXT PRIMARY KEY,
   updated_at INTEGER NOT NULL,
   updated_at_ms INTEGER,
-  cli_version TEXT NOT NULL DEFAULT ''
+  cli_version TEXT NOT NULL DEFAULT '',
+  model_provider TEXT
 );
 CREATE TABLE thread_dynamic_tools (
   thread_id TEXT NOT NULL,
@@ -178,6 +179,61 @@ SQL
 run_codex oldreader resume old-thread-1 >/tmp/codex-multi-account-cross-version.out 2>/tmp/codex-multi-account-cross-version.err
 grep -q 'skipping cross-version state sync' /tmp/codex-multi-account-cross-version.err
 [ "$(sqlite3 "$TEST_HOME/.codex-accounts/oldreader/state_5.sqlite" "SELECT count(*) FROM threads WHERE id = 'old-thread-1';")" = "0" ]
+
+run_codex as provowner --version >/tmp/codex-multi-account-provowner.out
+run_codex as provgw --version >/tmp/codex-multi-account-provgw.out
+run_codex as provdefault --version >/tmp/codex-multi-account-provdefault.out
+create_resume_state_db "$TEST_HOME/.codex-accounts/provowner/state_5.sqlite"
+create_resume_state_db "$TEST_HOME/.codex-accounts/provgw/state_5.sqlite"
+create_resume_state_db "$TEST_HOME/.codex-accounts/provdefault/state_5.sqlite"
+cat > "$TEST_HOME/.codex-accounts/provgw/config.toml" <<'TOML'
+model = "gpt-5.6-sol"
+model_provider = "gateway"
+
+[model_providers.gateway]
+name = "Test Gateway"
+model_provider = "must-be-ignored"
+TOML
+cat > "$TEST_HOME/.codex-accounts/provdefault/config.toml" <<'TOML'
+model = "gpt-5.6-sol"
+TOML
+sqlite3 "$TEST_HOME/.codex-accounts/provowner/state_5.sqlite" <<'SQL'
+INSERT INTO threads (id, updated_at, updated_at_ms, cli_version, model_provider) VALUES ('prov-thread-1', 3000, 3000000, '0.143.0', 'openai');
+INSERT INTO threads (id, updated_at, updated_at_ms, cli_version, model_provider) VALUES ('prov-thread-2', 3100, 3100000, '0.143.0', 'gateway');
+SQL
+
+# An imported thread is re-stamped with the resuming profile's own provider.
+run_codex provgw resume prov-thread-1 >/tmp/codex-multi-account-prov-gw.out
+grep -q "fake-codex --cd $PWD resume prov-thread-1" /tmp/codex-multi-account-prov-gw.out
+[ "$(sqlite3 "$TEST_HOME/.codex-accounts/provgw/state_5.sqlite" "SELECT model_provider FROM threads WHERE id = 'prov-thread-1';")" = "gateway" ]
+[ "$(sqlite3 "$TEST_HOME/.codex-accounts/provowner/state_5.sqlite" "SELECT model_provider FROM threads WHERE id = 'prov-thread-1';")" = "openai" ]
+
+# A profile with no model_provider falls back to the built-in openai provider.
+run_codex provdefault resume prov-thread-2 >/tmp/codex-multi-account-prov-default.out
+[ "$(sqlite3 "$TEST_HOME/.codex-accounts/provdefault/state_5.sqlite" "SELECT model_provider FROM threads WHERE id = 'prov-thread-2';")" = "openai" ]
+
+# align-providers repairs threads that were never resumed by session id.
+sqlite3 "$TEST_HOME/.codex-accounts/provgw/state_5.sqlite" <<'SQL'
+INSERT INTO threads (id, updated_at, updated_at_ms, cli_version, model_provider) VALUES ('prov-thread-3', 3200, 3200000, '0.143.0', 'openai');
+INSERT INTO threads (id, updated_at, updated_at_ms, cli_version, model_provider) VALUES ('prov-thread-4', 3300, 3300000, '0.143.0', NULL);
+SQL
+run_codex align-providers provgw >/tmp/codex-multi-account-align-one.out
+grep -q "provgw: 2 thread(s) aligned to provider 'gateway'." /tmp/codex-multi-account-align-one.out
+[ "$(sqlite3 "$TEST_HOME/.codex-accounts/provgw/state_5.sqlite" "SELECT count(*) FROM threads WHERE model_provider = 'gateway';")" = "3" ]
+find "$TEST_HOME/.codex-shared/state-sync-backups/provgw" -name 'state_5-before-align-providers-*.sqlite' | grep -q .
+
+run_codex align-providers provgw >/tmp/codex-multi-account-align-again.out
+grep -q "provgw: already aligned to provider 'gateway'." /tmp/codex-multi-account-align-again.out
+
+set +e
+run_codex align-providers nosuchprofile >/tmp/codex-multi-account-align-missing.out 2>&1
+align_missing_status=$?
+set -e
+[ "$align_missing_status" -ne 0 ]
+
+run_codex align-providers >/tmp/codex-multi-account-align-all.out
+grep -q 'Aligned ' /tmp/codex-multi-account-align-all.out
+[ "$(sqlite3 "$TEST_HOME/.codex-accounts/provdefault/state_5.sqlite" "SELECT count(*) FROM threads WHERE model_provider = 'openai';")" = "1" ]
 
 mkdir -p "$TEST_HOME/.codex-accounts/goalreader/cache/codex_apps_tools"
 mkdir -p "$TEST_HOME/.codex-accounts/goalreader/cache/codex_apps_server_info"
