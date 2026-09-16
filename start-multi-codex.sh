@@ -110,7 +110,7 @@ install_wrapper() {
 # $MARKER
 set -euo pipefail
 
-REAL_CODEX="$real_codex"
+REAL_CODEX="\${CODEX_MULTI_REAL_CODEX:-$real_codex}"
 ACCOUNTS_HOME="\${CODEX_MULTI_ACCOUNTS_HOME:-\$HOME/.codex-accounts}"
 SHARED_SESSIONS="\${CODEX_MULTI_SHARED_SESSIONS:-\$HOME/.codex-shared/sessions}"
 SESSION_LOCKS="\${CODEX_MULTI_SESSION_LOCKS:-\$HOME/.codex-shared/session-locks}"
@@ -159,7 +159,7 @@ trap 'cleanup_on_exit' EXIT INT TERM
 
 is_reserved_command() {
   case "\${1:-}" in
-    ""|as|profile|use|default|accounts|remove-account|delete-account|account-home|sessions-home|shared-sessions|locks|clear-stale-locks|real|help|\\
+    ""|as|profile|use|default|accounts|remove-account|delete-account|account-home|sessions-home|shared-sessions|locks|clear-stale-locks|upgrade-cleanup|real|help|\\
 exec|e|review|login|logout|mcp|plugin|mcp-server|app-server|remote-control|completion|update|sandbox|debug|apply|a|resume|fork|cloud|exec-server|features)
       return 0 ;;
     *) return 1 ;;
@@ -337,6 +337,17 @@ resume_session_arg() {
   return 1
 }
 
+has_working_directory_arg() {
+  local arg
+  for arg in "\$@"; do
+    case "\$arg" in
+      --) return 1 ;;
+      -C|--cd|--cd=*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 sql_quote() {
   local value="\${1:-}"
   value="\${value//\'/\'\'}"
@@ -364,6 +375,28 @@ sqlite_tables_match() {
   left_sql="\$(sqlite_table_sql "\$left_db" "\$table")"
   right_sql="\$(sqlite_table_sql "\$right_db" "\$table")"
   [ -n "\$left_sql" ] && [ "\$left_sql" = "\$right_sql" ]
+}
+
+codex_version_number() {
+  sed -nE 's/.*([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | sed -n '1p'
+}
+
+codex_version_key() {
+  local version="\${1:-}"
+  printf '%s\\n' "\$version" | sed -nE 's/^([0-9]+\.[0-9]+)(\.[0-9]+)?.*/\1/p'
+}
+
+codex_binary_version() {
+  local real="\$1"
+  "\$real" --version 2>/dev/null | codex_version_number
+}
+
+thread_cli_version() {
+  local db="\$1" session_id="\$2" sid
+  [ -f "\$db" ] || return 0
+  sqlite_table_exists "\$db" threads || return 0
+  sid="\$(sql_quote "\$session_id")"
+  sqlite_scalar "\$db" "SELECT COALESCE(cli_version, '') FROM threads WHERE id = \$sid;"
 }
 
 state_db_candidate_score() {
@@ -473,7 +506,9 @@ append_table_sync_sql() {
 }
 
 sync_resume_state() {
-  local acct="\$1" session_id="\$2" target_db source_db sql table table_sql
+  local acct="\$1" session_id="\$2" current_version_key="\${3:-}"
+  local target_db source_db sql table table_sql
+  local source_thread_version source_version_key target_thread_version target_version_key sync_dynamic_tools=0
   [ -n "\$session_id" ] || return 0
   command -v sqlite3 >/dev/null 2>&1 || {
     echo "codex: sqlite3 not found; skipping cross-profile resume state sync." >&2
@@ -490,6 +525,29 @@ sync_resume_state() {
     return 0
   fi
 
+  source_thread_version="\$(thread_cli_version "\$source_db" "\$session_id")"
+  source_version_key="\$(codex_version_key "\$source_thread_version")"
+  target_thread_version="\$(thread_cli_version "\$target_db" "\$session_id")"
+  target_version_key="\$(codex_version_key "\$target_thread_version")"
+
+  if [ -n "\$current_version_key" ] && [ -n "\$source_version_key" ] && [ "\$source_version_key" != "\$current_version_key" ]; then
+    echo "codex: found resume state from Codex \$source_thread_version, but current Codex is \$current_version_key.x; skipping cross-version state sync." >&2
+    return 0
+  fi
+
+  if [ -n "\$current_version_key" ] && [ -n "\$target_version_key" ] && [ "\$target_version_key" != "\$current_version_key" ]; then
+    echo "codex: target profile has resume state from Codex \$target_thread_version, but current Codex is \$current_version_key.x; skipping cross-version state sync." >&2
+    return 0
+  fi
+
+  if [ "\${CODEX_MULTI_SYNC_DYNAMIC_TOOLS:-0}" = "1" ]; then
+    if [ -n "\$source_thread_version" ] && [ "\$source_thread_version" = "\$target_thread_version" ]; then
+      sync_dynamic_tools=1
+    elif [ -n "\$source_thread_version" ] && [ -n "\$current_version_key" ] && [ "\$source_version_key" = "\$current_version_key" ] && [ -z "\$target_thread_version" ]; then
+      sync_dynamic_tools=1
+    fi
+  fi
+
   if ! backup_state_db "\$target_db" "\$acct" "\$session_id"; then
     echo "codex: could not back up \$target_db; skipping cross-profile resume state sync." >&2
     return 0
@@ -497,6 +555,9 @@ sync_resume_state() {
 
   sql="PRAGMA busy_timeout = 5000;\\nATTACH DATABASE \$(sql_quote "\$source_db") AS src;\\n"
   for table in threads thread_goals thread_dynamic_tools stage1_outputs thread_spawn_edges; do
+    if [ "\$table" = "thread_dynamic_tools" ] && [ "\$sync_dynamic_tools" -ne 1 ]; then
+      continue
+    fi
     table_sql="\$(append_table_sync_sql "\$target_db" "\$source_db" "\$table" "\$session_id")"
     [ -n "\$table_sql" ] || continue
     sql="\$sql\$table_sql"
@@ -505,6 +566,77 @@ sync_resume_state() {
 
   if ! printf '%b' "\$sql" | sqlite3 "\$target_db" >/dev/null; then
     echo "codex: cross-profile resume state sync failed; target backup was kept under \$STATE_SYNC_BACKUPS." >&2
+    return 0
+  fi
+}
+
+find_resume_goal_source_db() {
+  local target_acct="\$1" session_id="\$2" target_db="\$3"
+  local path acct db updated best_db="" best_updated=0 sid
+  sid="\$(sql_quote "\$session_id")"
+  mkdir -p "\$ACCOUNTS_HOME"
+  for path in "\$ACCOUNTS_HOME"/*; do
+    [ -d "\$path" ] || continue
+    acct="\${path##*/}"
+    [ "\$acct" != "\$target_acct" ] || continue
+    is_profile_name "\$acct" || continue
+    db="\$path/goals_1.sqlite"
+    [ -f "\$db" ] || continue
+    sqlite_tables_match "\$target_db" "\$db" thread_goals || continue
+    updated="\$(sqlite_scalar "\$db" "SELECT COALESCE(updated_at_ms, 0) FROM thread_goals WHERE thread_id = \$sid;")"
+    case "\$updated" in ''|*[!0-9]*) continue ;; esac
+    if [ "\$updated" -gt "\$best_updated" ]; then
+      best_db="\$db"
+      best_updated="\$updated"
+    fi
+  done
+  [ -n "\$best_db" ] && printf '%s\\n' "\$best_db"
+}
+
+backup_goal_db() {
+  local target_db="\$1" acct="\$2" session_id="\$3" backup_dir backup_path ts safe_session
+  ts="\$(date +%Y%m%d-%H%M%S 2>/dev/null || date +%s)"
+  safe_session="\${session_id//[^A-Za-z0-9._-]/_}"
+  backup_dir="\$STATE_SYNC_BACKUPS/\$acct"
+  backup_path="\$backup_dir/goals_1-before-\$safe_session-\$ts-\$\$.sqlite"
+  mkdir -p "\$backup_dir"
+  chmod 700 "\$STATE_SYNC_BACKUPS" "\$backup_dir" 2>/dev/null || true
+  sqlite3 "\$target_db" ".timeout 5000" ".backup \$(sql_quote "\$backup_path")" >/dev/null
+  chmod 600 "\$backup_path" 2>/dev/null || true
+}
+
+sync_resume_goal() {
+  local acct="\$1" session_id="\$2" target_db source_db sid sql
+  target_db="\$ACCOUNTS_HOME/\$acct/goals_1.sqlite"
+  [ -f "\$target_db" ] || return 0
+  source_db="\$(find_resume_goal_source_db "\$acct" "\$session_id" "\$target_db" || true)"
+  [ -n "\$source_db" ] || return 0
+
+  if ! backup_goal_db "\$target_db" "\$acct" "\$session_id"; then
+    echo "codex: could not back up \$target_db; skipping cross-profile goal sync." >&2
+    return 0
+  fi
+
+  sid="\$(sql_quote "\$session_id")"
+  sql="PRAGMA busy_timeout = 5000;
+ATTACH DATABASE \$(sql_quote "\$source_db") AS src;
+INSERT OR IGNORE INTO thread_goals SELECT * FROM src.thread_goals WHERE thread_id = \$sid;
+UPDATE thread_goals SET
+  goal_id = (SELECT goal_id FROM src.thread_goals WHERE thread_id = \$sid),
+  objective = (SELECT objective FROM src.thread_goals WHERE thread_id = \$sid),
+  status = (SELECT status FROM src.thread_goals WHERE thread_id = \$sid),
+  token_budget = (SELECT token_budget FROM src.thread_goals WHERE thread_id = \$sid),
+  tokens_used = (SELECT tokens_used FROM src.thread_goals WHERE thread_id = \$sid),
+  time_used_seconds = (SELECT time_used_seconds FROM src.thread_goals WHERE thread_id = \$sid),
+  created_at_ms = (SELECT created_at_ms FROM src.thread_goals WHERE thread_id = \$sid),
+  updated_at_ms = (SELECT updated_at_ms FROM src.thread_goals WHERE thread_id = \$sid)
+WHERE thread_id = \$sid
+  AND EXISTS (SELECT 1 FROM src.thread_goals WHERE thread_id = \$sid)
+  AND (SELECT updated_at_ms FROM src.thread_goals WHERE thread_id = \$sid) > updated_at_ms;
+DETACH DATABASE src;"
+
+  if ! printf '%s\\n' "\$sql" | sqlite3 "\$target_db" >/dev/null; then
+    echo "codex: cross-profile goal sync failed; target backup was kept under \$STATE_SYNC_BACKUPS." >&2
     return 0
   fi
 }
@@ -565,6 +697,33 @@ clear_stale_session_locks() {
   echo "Removed \$removed stale Codex session lock(s)."
 }
 
+clear_runtime_caches() {
+  local path acct cache_path removed=0
+  clear_stale_session_locks
+  mkdir -p "\$ACCOUNTS_HOME"
+  for path in "\$ACCOUNTS_HOME"/*; do
+    [ -d "\$path" ] || continue
+    acct="\${path##*/}"
+    is_profile_name "\$acct" || continue
+    for cache_path in \\
+      "\$path/cache/codex_apps_server_info" \\
+      "\$path/cache/codex_apps_tools" \\
+      "\$path/cache/remote_plugin_catalog" \\
+      "\$path/.tmp/app-server-remote-plugin-sync-v1" \\
+      "\$path/.tmp/plugins.sync.lock" \\
+      "\$path/.tmp/plugins.sha" \\
+      "\$path/app-server-control"
+    do
+      if [ -e "\$cache_path" ] || [ -L "\$cache_path" ]; then
+        rm -rf "\$cache_path" 2>/dev/null || true
+        removed=\$((removed + 1))
+      fi
+    done
+  done
+  echo "Removed \$removed Codex runtime cache path(s)."
+  echo "Close and restart any running Codex/app-server/exec-server processes before launching an upgraded CLI."
+}
+
 acquire_session_lock() {
   local acct="\$1" session_id key lock_dir owner_pid
   shift
@@ -584,19 +743,27 @@ acquire_session_lock() {
 }
 
 run_codex() {
-  local acct="\$1" real status session_id
+  local acct="\$1" real status session_id current_version current_version_key
+  local -a codex_args
   shift
   real="\$(resolve_real_codex)" || { echo "codex: official Codex binary not found." >&2; return 127; }
+  current_version="\$(codex_binary_version "\$real")"
+  current_version_key="\$(codex_version_key "\$current_version")"
   acquire_session_lock "\$acct" "\$@"
   session_id="\$(resume_session_arg "\$@" || true)"
   if [ -n "\$session_id" ]; then
-    sync_resume_state "\$acct" "\$session_id"
+    sync_resume_state "\$acct" "\$session_id" "\$current_version_key"
+    sync_resume_goal "\$acct" "\$session_id"
+  fi
+  codex_args=("\$@")
+  if ! has_working_directory_arg "\${codex_args[@]}"; then
+    codex_args=(--cd "\$PWD" "\${codex_args[@]}")
   fi
   set +e
   if [ "\${TERM_PROGRAM:-}" = "vscode" ]; then
-    env CODEX_HOME="\$ACCOUNTS_HOME/\$acct" CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT=1 "\$real" "\$@"
+    env CODEX_HOME="\$ACCOUNTS_HOME/\$acct" CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT=1 "\$real" "\${codex_args[@]}"
   else
-    env CODEX_HOME="\$ACCOUNTS_HOME/\$acct" "\$real" "\$@"
+    env CODEX_HOME="\$ACCOUNTS_HOME/\$acct" "\$real" "\${codex_args[@]}"
   fi
   status=\$?
   set -e
@@ -624,6 +791,7 @@ case "\${1:-}" in
   sessions-home|shared-sessions) echo "\$SHARED_SESSIONS" ;;
   locks) list_session_locks ;;
   clear-stale-locks) clear_stale_session_locks ;;
+  upgrade-cleanup) clear_runtime_caches ;;
   real) resolve_real_codex ;;
   help)
     cat <<'HELP'
@@ -640,6 +808,10 @@ Usage:
   codex shared-sessions         Print shared sessions directory
   codex locks                   List active/stale explicit-resume locks
   codex clear-stale-locks       Remove stale explicit-resume locks
+  codex upgrade-cleanup         Clear stale locks and Codex runtime/tool caches
+
+Set CODEX_MULTI_REAL_CODEX to test a specific official Codex binary without
+changing the global install used by every profile.
 
 Profile names may contain only letters, numbers, dot, underscore, and dash.
 Unknown first words are passed to the official Codex binary through the default
@@ -710,7 +882,7 @@ main() {
     is_profile_name "$DEFAULT_PROFILE" || fail "Invalid CODEX_MULTI_DEFAULT_PROFILE: $DEFAULT_PROFILE"
   fi
 
-  local real_codex ts backup
+  local real_codex ts backup display_default
   real_codex="$(resolve_real_codex)" || fail "Could not find the official Codex binary in PATH or common locations."
   ts="$(date +%Y%m%d-%H%M%S)"
   backup="$BACKUP_ROOT/$ts"
@@ -760,8 +932,12 @@ main() {
   printf 'Backup: %s\n' "$backup"
   printf 'Official Codex: %s\n' "$real_codex"
   printf 'Wrapper: %s\n' "$WRAPPER_PATH"
-  if [ -n "$DEFAULT_PROFILE" ]; then
-    printf 'Default profile: %s\n' "$DEFAULT_PROFILE"
+  display_default="$DEFAULT_PROFILE"
+  if [ -z "$display_default" ] && [ -f "$DEFAULT_PROFILE_FILE" ]; then
+    IFS= read -r display_default < "$DEFAULT_PROFILE_FILE" || display_default=""
+  fi
+  if [ -n "$display_default" ]; then
+    printf 'Default profile: %s\n' "$display_default"
   else
     printf 'Default profile: not set yet; first "codex as <profile> ..." will set it.\n'
   fi
