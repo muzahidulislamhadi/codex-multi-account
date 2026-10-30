@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_HOME="$(mktemp -d /tmp/codex-multi-account-test.XXXXXX)"
+# Tests may themselves run inside a Codex account session.
+unset CODEX_HOME
 
 cleanup() {
   rm -rf "$TEST_HOME"
@@ -18,6 +20,7 @@ if [ "${1:-}" = "--version" ]; then
   exit 0
 fi
 echo "fake-codex $*"
+echo "codex-home=${CODEX_HOME:-unset}"
 echo "keyboard-enhancement=${CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT:-unset}"
 echo "gateway-key=${TEST_GATEWAY_KEY:-unset}"
 echo "quoted-key=${TEST_QUOTED_KEY:-unset}"
@@ -136,6 +139,22 @@ grep -q $'firstacc\tnot-logged-in\tdefault' /tmp/codex-multi-account-accounts.ou
 
 run_codex as secondacc --version >/tmp/codex-multi-account-second.out 2>/tmp/codex-multi-account-second.err
 [ -d "$TEST_HOME/.codex-accounts/secondacc" ]
+
+# Nested headless launches must retain the parent account, not the saved default.
+for args in 'exec --model gpt-6.1-sol' '--version' '' 'future-command'; do
+  read -r -a inherited_args <<< "$args" || true
+  CODEX_HOME="$TEST_HOME/.codex-accounts/secondacc/" run_codex "${inherited_args[@]}" > "$TEST_HOME/inherited.out"
+  grep -Fxq "codex-home=$TEST_HOME/.codex-accounts/secondacc" "$TEST_HOME/inherited.out"
+done
+CODEX_HOME="$TEST_HOME/.codex-accounts/secondacc" run_codex firstacc exec > "$TEST_HOME/explicit.out"
+grep -Fxq "codex-home=$TEST_HOME/.codex-accounts/firstacc" "$TEST_HOME/explicit.out"
+CODEX_HOME="$TEST_HOME/.codex-accounts/secondacc" run_codex as firstacc exec > "$TEST_HOME/as-explicit.out"
+grep -Fxq "codex-home=$TEST_HOME/.codex-accounts/firstacc" "$TEST_HOME/as-explicit.out"
+[ "$(CODEX_HOME="$TEST_HOME/.codex-accounts/secondacc" run_codex default)" = firstacc ]
+for inherited_home in "$TEST_HOME/elsewhere/secondacc" "$TEST_HOME/.codex-accounts/missing"; do
+  CODEX_HOME="$inherited_home" run_codex exec > "$TEST_HOME/fallback.out"
+  grep -Fxq "codex-home=$TEST_HOME/.codex-accounts/firstacc" "$TEST_HOME/fallback.out"
+done
 run_codex remove-account secondacc >/tmp/codex-multi-account-remove-second.out
 [ ! -e "$TEST_HOME/.codex-accounts/secondacc" ]
 

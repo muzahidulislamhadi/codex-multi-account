@@ -197,6 +197,21 @@ require_default_account() {
   return 1
 }
 
+launch_account() {
+  # Nested exec/app-server calls inherit CODEX_HOME from their parent session.
+  # Keep that account unless the caller explicitly names another profile.
+  local inherited_home="\${CODEX_HOME:-}" acct
+  inherited_home="\${inherited_home%/}"
+  acct="\${inherited_home##*/}"
+  if [ -n "\$inherited_home" ] && is_profile_name "\$acct" &&
+     [ "\$inherited_home" = "\${ACCOUNTS_HOME%/}/\$acct" ] &&
+     [ -d "\$inherited_home" ]; then
+    printf '%s\\n' "\$acct"
+    return 0
+  fi
+  require_default_account
+}
+
 ensure_default_account() {
   local acct="\$1"
   if default_account >/dev/null 2>&1; then
@@ -940,7 +955,7 @@ case "\${1:-}" in
 Codex multi-account wrapper
 
 Usage:
-  codex                         Run the default profile
+  codex                         Run the inherited profile, or saved default
   codex as <profile> [args...]  Create/use a named profile
   codex <profile> [args...]     Use an existing named profile
   codex default [profile]       Show or set the default profile
@@ -964,17 +979,17 @@ readable by the owner only (chmod 600).
 
 Profile names may contain only letters, numbers, dot, underscore, and dash.
 Unknown first words are passed to the official Codex binary through the default
-profile so future Codex commands keep working.
+or inherited profile so future Codex commands keep working.
 HELP
     ;;
   as|profile|use)
     [ -n "\${2:-}" ] || { echo "Usage: codex \$1 <profile> [codex-args...]" >&2; exit 1; }
     acct="\$2"; shift 2; ensure_profile "\$acct"; run_codex "\$acct" "\$@" ;;
   -*|"")
-    acct="\$(require_default_account)"; ensure_profile "\$acct"; run_codex "\$acct" "\$@" ;;
+    acct="\$(launch_account)"; ensure_profile "\$acct"; run_codex "\$acct" "\$@" ;;
   *)
     if is_reserved_command "\$1"; then
-      acct="\$(require_default_account)"; ensure_profile "\$acct"; run_codex "\$acct" "\$@"
+      acct="\$(launch_account)"; ensure_profile "\$acct"; run_codex "\$acct" "\$@"
     elif is_profile_name "\$1" && [ -d "\$ACCOUNTS_HOME/\$1" ]; then
       acct="\$1"; shift; ensure_profile "\$acct"; run_codex "\$acct" "\$@"
     elif is_profile_name "\$1" && [ "\$#" -gt 1 ] && is_reserved_command "\$2"; then
@@ -982,7 +997,7 @@ HELP
       echo "Create it with: codex as \$1 \$2" >&2
       exit 1
     elif is_profile_name "\$1"; then
-      acct="\$(require_default_account)"; ensure_profile "\$acct"; run_codex "\$acct" "\$@"
+      acct="\$(launch_account)"; ensure_profile "\$acct"; run_codex "\$acct" "\$@"
     else
       echo "codex: invalid profile name or command: \$1" >&2
       echo "Run 'codex help' for usage." >&2

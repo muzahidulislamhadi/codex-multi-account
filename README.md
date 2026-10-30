@@ -60,6 +60,17 @@ codex real
 
 The first profile you create becomes the default automatically.
 
+Commands without an explicit account inherit `CODEX_HOME` when it points to an
+existing profile in the accounts directory. For example, `codex exec` launched
+inside `codex account2` stays on account2, even if the saved default is account1.
+An explicit account (`codex account1 exec` or `codex as account1 exec`) takes
+precedence. Outside a managed profile, commands use the saved default;
+`codex default` always displays or changes that saved default.
+
+Model access can differ between accounts. If a headless run rejects a model
+that works interactively, try the same explicit account in both commands, such
+as `codex account2 exec -m gpt-6.1-sol -c model_reasoning_effort=high "..."`.
+
 ## Creating vs Using
 
 Use `as` to create a profile:
